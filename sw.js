@@ -4,7 +4,7 @@
 // - Ignores browser extension traffic
 // - Prevents console spam from failed extension requests
 
-const CACHE_NAME = "bray-fitness-v1";
+const CACHE_NAME = "bray-fitness-v2";
 const APP_SHELL = [
   "./",
   "./index.html",
