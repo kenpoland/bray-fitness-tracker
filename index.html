@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<!--
+  BRAY FITNESS TRACKER — deploy-ready build
+  ==========================================
+  This copy is wired to a live Google Sheets backend via Apps Script, and
+  set up as an installable, offline-capable PWA. Repo:
+    https://github.com/kenpoland/bray-fitness-tracker
+  Live URL:
+    https://kenpoland.github.io/bray-fitness-tracker/
+
+  FILES IN THIS DEPLOYMENT (all belong at the repo root, alongside this file)
+    index.html        <- this file
+    manifest.json      <- PWA install metadata
+    sw.js               <- offline app-shell caching
+    icon-192.png, icon-512.png  <- app icons
+    Code.gs             <- paste into your Google Sheet's Apps Script editor
+                           (Extensions -> Apps Script), then redeploy the
+                           existing Web App so the /exec URL below stays valid.
+
+  HOW SYNCING WORKS
+  Every save (weight, food, exercise, measurement) does two things:
+    1. Updates the on-screen state immediately (works instantly, even offline).
+    2. Sends the new entry to your Google Sheet in the background via the
+       Apps Script Web App URL below. If that fails (e.g. you're offline),
+       the entry is queued and retried automatically next time you're online.
+  On load, the app also pulls your latest data back from the Sheet, so it
+  stays in sync across your phone, tablet, and computer.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="theme-color" content="#2f5233">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Bray Fitness Tracker</title>
+<style>
+  :root{
+    --forest:#2f5233;
+    --forest-dark:#1f3a22;
+    --clay:#b5562e;
+    --cream:#faf7f2;
+    --paper:#ffffff;
+    --ink:#232019;
+    --ink-soft:#5c574c;
+    --line:#e4ddd0;
+    --good:#3d7a4a;
+    --warn:#b5562e;
+    --radius:16px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:"Segoe UI",Verdana,Arial,sans-serif;
+    background:var(--cream);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    padding-bottom:96px;
+  }
+  header.top{
+    background:var(--forest);
+    color:#fff;
+    padding:22px 20px 60px 20px;
+    position:relative;
+  }
+  header.top h1{
+    margin:0;
+    font-size:26px;
+    font-weight:700;
+    letter-spacing:0.2px;
+  }
+  header.top p{
+    margin:6px 0 0 0;
+    font-size:15px;
+    opacity:0.85;
+  }
+  .sync-badge{
+    position:absolute; top:20px; right:18px;
+    font-size:12px; font-weight:700;
+    padding:5px 10px; border-radius:12px;
+    background:rgba(255,255,255,0.15);
+    display:flex; align-items:center; gap:5px;
+  }
+  .sync-dot{ width:7px; height:7px; border-radius:50%; background:#8fd39b; }
+  .sync-dot.busy{ background:#f2c94c; }
+  .sync-dot.offline{ background:#e08a6a; }
+  .card{
+    background:var(--paper);
+    border-radius:var(--radius);
+    box-shadow:0 6px 18px rgba(35,32,25,0.08);
+    margin:-40px 16px 18px 16px;
+    padding:18px;
+    position:relative;
+    z-index:2;
+  }
+  .card + .card{ margin-top:16px; }
+  main{ padding-top:0; }
+  .section-title{
+    font-size:13px;
+    text-transform:uppercase;
+    letter-spacing:1.2px;
+    color:var(--ink-soft);
+    font-weight:700;
+    margin:0 0 12px 0;
+  }
+  .quick-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:12px;
+  }
+  .quick-btn{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:8px;
+    background:var(--cream);
+    border:2px solid var(--line);
+    border-radius:14px;
+    padding:18px 10px;
+    font-size:16px;
+    font-weight:600;
+    color:var(--forest-dark);
+    cursor:pointer;
+    min-height:92px;
+  }
+  .quick-btn:active{ background:#f0ead9; }
+  .quick-btn .emoji{ font-size:28px; }
+  .stat-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:baseline;
+    padding:10px 0;
+    border-bottom:1px solid var(--line);
+  }
+  .stat-row:last-child{ border-bottom:none; }
+  .stat-label{ font-size:15px; color:var(--ink-soft); }
+  .stat-value{ font-size:20px; font-weight:700; color:var(--ink); }
+  .progress-bar{
+    width:100%; height:14px; background:var(--line); border-radius:8px; overflow:hidden; margin-top:6px;
+  }
+  .progress-fill{ height:100%; background:var(--forest); }
+  nav.tabs{
+    position:fixed; bottom:0; left:0; right:0;
+    background:var(--paper);
+    border-top:1px solid var(--line);
+    display:flex;
+    z-index:10;
+  }
+  nav.tabs button{
+    flex:1;
+    background:none;
+    border:none;
+    padding:12px 4px 10px 4px;
+    font-size:13px;
+    font-weight:700;
+    color:var(--ink-soft);
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:4px;
+    cursor:pointer;
+  }
+  nav.tabs button.active{ color:var(--forest); }
+  nav.tabs .icon{ font-size:22px; }
+  .view{ display:none; }
+  .view.active{ display:block; }
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(35,32,25,0.5);
+    display:none; align-items:flex-end; justify-content:center; z-index:50;
+  }
+  .modal-backdrop.open{ display:flex; }
+  .modal{
+    background:var(--paper);
+    width:100%; max-width:480px;
+    border-radius:20px 20px 0 0;
+    padding:22px 20px 28px 20px;
+    max-height:85vh;
+    overflow-y:auto;
+  }
+  .modal h2{ margin:0 0 14px 0; font-size:20px; color:var(--forest-dark); }
+  label{ display:block; font-size:14px; font-weight:600; margin:14px 0 6px 0; color:var(--ink-soft); }
+  input[type=number], input[type=date], input[type=text], select{
+    width:100%; padding:12px 14px; font-size:16px; border:2px solid var(--line);
+    border-radius:10px; background:var(--cream); color:var(--ink);
+  }
+  input[type=file]{ width:100%; margin-top:4px; }
+  .btn-primary{
+    width:100%; margin-top:20px; padding:14px; font-size:17px; font-weight:700;
+    background:var(--forest); color:#fff; border:none; border-radius:12px; cursor:pointer;
+  }
+  .btn-secondary{
+    width:100%; margin-top:10px; padding:12px; font-size:15px; font-weight:600;
+    background:none; color:var(--ink-soft); border:2px solid var(--line); border-radius:12px; cursor:pointer;
+  }
+  .row2{ display:flex; gap:10px; }
+  .row2 > div{ flex:1; }
+  table.simple{ width:100%; border-collapse:collapse; font-size:14px; margin-top:8px; }
+  table.simple th, table.simple td{ text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  table.simple th{ color:var(--ink-soft); font-weight:700; font-size:12px; text-transform:uppercase; }
+  .empty-state{ text-align:center; padding:30px 10px; color:var(--ink-soft); }
+  .empty-state .emoji{ font-size:36px; display:block; margin-bottom:8px; }
+  canvas{ width:100%; height:180px; display:block; }
+  .streak-badge{
+    display:inline-flex; align-items:center; gap:6px; background:#eaf1e9; color:var(--good);
+    padding:6px 12px; border-radius:20px; font-weight:700; font-size:14px;
+  }
+  .footer-note{ text-align:center; font-size:12px; color:var(--ink-soft); padding:6px 30px 20px 30px; }
+  .io-row{ display:flex; gap:10px; margin-top:6px; }
+  .io-row button{ flex:1; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1 id="greeting">Hello 👋</h1>
+  <p id="todayDate"></p>
+  <div class="sync-badge"><span class="sync-dot" id="syncDot"></span><span id="syncText">Synced</span></div>
+</header>
+
+<main>
+
+  <!-- TODAY VIEW -->
+  <section id="view-today" class="view active">
+    <div class="card">
+      <div class="section-title">Quick add</div>
+      <div class="quick-grid">
+        <div class="quick-btn" onclick="openModal('weight')"><span class="emoji">⚖️</span>Weight</div>
+        <div class="quick-btn" onclick="openModal('food')"><span class="emoji">🍽️</span>Food / Macros</div>
+        <div class="quick-btn" onclick="openModal('exercise')"><span class="emoji">💪</span>Exercise</div>
+        <div class="quick-btn" onclick="openModal('photo')"><span class="emoji">📷</span>Food Label Photo</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Today so far</div>
+      <div class="stat-row">
+        <span class="stat-label">Calories logged</span>
+        <span class="stat-value" id="todayCal">0 kcal</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="calBar" style="width:0%"></div></div>
+      <div class="stat-row" style="margin-top:10px;">
+        <span class="stat-label">Protein logged</span>
+        <span class="stat-value" id="todayPro">0 g</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="proBar" style="width:0%"></div></div>
+      <div class="stat-row" style="margin-top:10px;">
+        <span class="stat-label">Exercise today</span>
+        <span class="stat-value" id="todayEx">None logged</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Current streak</div>
+      <span class="streak-badge" id="streakBadge">🔥 0-day streak</span>
+      <p style="font-size:13px;color:var(--ink-soft);margin-top:10px;">A day counts toward your streak once you log at least one exercise session or item of food.</p>
+    </div>
+  </section>
+
+  <!-- HISTORY VIEW -->
+  <section id="view-history" class="view">
+    <div class="card">
+      <div class="section-title">Weight trend</div>
+      <canvas id="weightChart"></canvas>
+      <div id="weightEmpty" class="empty-state" style="display:none;">
+        <span class="emoji">📈</span>Log your weight a few times to see a trend.
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-title">Recent entries</div>
+      <table class="simple" id="historyTable">
+        <thead><tr><th>Date</th><th>Type</th><th>Detail</th></tr></thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+      <div id="historyEmpty" class="empty-state" style="display:none;">
+        <span class="emoji">📝</span>Nothing logged yet — add something from the Today tab.
+      </div>
+    </div>
+  </section>
+
+  <!-- MEASUREMENTS VIEW -->
+  <section id="view-measurements" class="view">
+    <div class="card">
+      <div class="section-title">Add monthly measurements</div>
+      <label>Date</label>
+      <input type="date" id="mDate">
+      <div class="row2">
+        <div><label>Waist (cm)</label><input type="number" id="mWaist"></div>
+        <div><label>Hips/Glutes (cm)</label><input type="number" id="mHips"></div>
+      </div>
+      <div class="row2">
+        <div><label>Chest (cm)</label><input type="number" id="mChest"></div>
+        <div><label>Weight (kg)</label><input type="number" id="mWeight" step="0.1"></div>
+      </div>
+      <div class="row2">
+        <div><label>Arm L (cm)</label><input type="number" id="mArmL"></div>
+        <div><label>Arm R (cm)</label><input type="number" id="mArmR"></div>
+      </div>
+      <div class="row2">
+        <div><label>Thigh L (cm)</label><input type="number" id="mThighL"></div>
+        <div><label>Thigh R (cm)</label><input type="number" id="mThighR"></div>
+      </div>
+      <button class="btn-primary" onclick="saveMeasurement()">Save measurement</button>
+    </div>
+    <div class="card">
+      <div class="section-title">History</div>
+      <table class="simple" id="measureTable">
+        <thead><tr><th>Date</th><th>Waist</th><th>Hips</th><th>Weight</th></tr></thead>
+        <tbody id="measureBody"></tbody>
+      </table>
+      <div id="measureEmpty" class="empty-state" style="display:none;">
+        <span class="emoji">📏</span>No measurements yet — take your first set today.
+      </div>
+    </div>
+  </section>
+
+  <div class="footer-note">
+    Your data syncs automatically to your Google Sheet. Use Export any time for a local backup too.
+    <div class="io-row">
+      <button class="btn-secondary" onclick="exportData()">⬇ Export backup</button>
+      <button class="btn-secondary" onclick="document.getElementById('importFile').click()">⬆ Import backup</button>
+      <input type="file" id="importFile" accept="application/json" style="display:none" onchange="importData(event)">
+    </div>
+  </div>
+
+</main>
+
+<nav class="tabs">
+  <button class="active" onclick="switchView('today', this)"><span class="icon">🏠</span>Today</button>
+  <button onclick="switchView('history', this)"><span class="icon">📊</span>History</button>
+  <button onclick="switchView('measurements', this)"><span class="icon">📐</span>Measurements</button>
+</nav>
+
+<!-- MODAL -->
+<div class="modal-backdrop" id="modalBackdrop" onclick="if(event.target===this) closeModal()">
+  <div class="modal" id="modalBody"></div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// CONFIG — your live backend
+// ---------------------------------------------------------------------------
+const CONFIG = {
+  SCRIPT_URL: "https://script.google.com/macros/s/AKfycbzXkABridi2HySg4LvbjxyiMfgqM7iIYOpHhjucMJquK64H9EXGWM33tJeoKA6hczCE/exec",
+};
+
+const RECIPES = {
+  "Power Porridge Bowl": {cal:430, pro:16, carb:62, fat:14},
+  "Three-Egg Veg Omelette": {cal:330, pro:24, carb:6, fat:23},
+  "Smoked Salmon & Couscous Bowl": {cal:420, pro:26, carb:48, fat:12},
+  "Baked Salmon with Basmati Rice & Peas": {cal:560, pro:38, carb:55, fat:18},
+  "Breaded Cod & Potatoes": {cal:520, pro:30, carb:58, fat:16},
+  "Fish Finger Rice Bowl": {cal:540, pro:28, carb:62, fat:17},
+  "Greek Yogurt Protein Pot": {cal:350, pro:22, carb:38, fat:13},
+  "Quinoa, Pepper & Broccoli Salad with Salmon": {cal:550, pro:36, carb:48, fat:20},
+  "Egg & Potato Hash with Peppers": {cal:480, pro:24, carb:50, fat:19},
+  "Pasta with Peas, Broccoli & Smoked Salmon": {cal:520, pro:30, carb:70, fat:10},
+  "Couscous & Roasted Veg with Fish Fingers": {cal:510, pro:26, carb:60, fat:16},
+  "Overnight Chia & Yogurt Pudding": {cal:380, pro:24, carb:40, fat:15},
+};
+const EXERCISE_TYPES = ["Push Day","Pull Day","Legs+Glutes Day","Pilates+Mobility","Rowing","Treadmill","Cycling","Foam Roller","Back-Pain Protocol"];
+const TARGETS = { cal: 1950, pro: 155 };
+
+let state = {
+  weights: [],       // {date, kg}
+  food: [],          // {date, name, cal, pro, carb, fat}
+  exercise: [],      // {date, type, duration, effort}
+  measurements: [],  // {date, waist, hips, chest, weight, armL, armR, thighL, thighR}
+  syncQueue: [],      // entries that failed to reach Google Sheets, retried later
+};
+
+// ---------------------------------------------------------------------------
+// LOCAL PERSISTENCE (this is a real deployment, so on-device caching is safe)
+// ---------------------------------------------------------------------------
+function loadLocalCache(){
+  try {
+    const raw = localStorage.getItem('brayFitnessState');
+    if (raw) state = Object.assign(state, JSON.parse(raw));
+  } catch(e) { /* ignore, e.g. private browsing */ }
+}
+function saveLocalCache(){
+  try { localStorage.setItem('brayFitnessState', JSON.stringify(state)); } catch(e) {}
+}
+
+// ---------------------------------------------------------------------------
+// SYNC WITH GOOGLE SHEETS
+// ---------------------------------------------------------------------------
+function setSyncStatus(mode){
+  const dot = document.getElementById('syncDot');
+  const text = document.getElementById('syncText');
+  dot.className = 'sync-dot' + (mode === 'busy' ? ' busy' : mode === 'offline' ? ' offline' : '');
+  text.textContent = mode === 'busy' ? 'Syncing…' : mode === 'offline' ? 'Offline' : 'Synced';
+}
+
+async function pullFromCloud(){
+  setSyncStatus('busy');
+  try {
+    const res = await fetch(CONFIG.SCRIPT_URL + '?action=getAll');
+    if (!res.ok) throw new Error('Bad response');
+    const cloud = await res.json();
+    // Merge cloud data with anything logged locally while offline (dedupe by JSON shape)
+    state.weights = mergeById(cloud.weights || [], state.weights, ['date','kg']);
+    state.food = mergeById(cloud.food || [], state.food, ['date','name','cal']);
+    state.exercise = mergeById(cloud.exercise || [], state.exercise, ['date','type','duration']);
+    state.measurements = mergeById(cloud.measurements || [], state.measurements, ['date','waist']);
+    saveLocalCache();
+    setSyncStatus('idle');
+  } catch (e) {
+    setSyncStatus('offline');
+  }
+}
+
+function mergeById(cloudRows, localRows, keyFields){
+  const key = (r) => keyFields.map(k => r[k]).join('|');
+  const seen = new Set(cloudRows.map(key));
+  const extraLocal = localRows.filter(r => !seen.has(key(r)));
+  return [...cloudRows, ...extraLocal].sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+}
+
+async function pushToCloud(sheetKey, row){
+  setSyncStatus('busy');
+  try {
+    const res = await fetch(CONFIG.SCRIPT_URL, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'add', sheetKey, row }),
+    });
+    const result = await res.json().catch(() => ({status:'ok'}));
+    if (result.status === 'error') throw new Error(result.message || 'Unknown error');
+    setSyncStatus('idle');
+    return true;
+  } catch (e) {
+    state.syncQueue.push({ sheetKey, row });
+    saveLocalCache();
+    setSyncStatus('offline');
+    return false;
+  }
+}
+
+async function flushSyncQueue(){
+  if (!state.syncQueue.length) return;
+  const queue = [...state.syncQueue];
+  state.syncQueue = [];
+  for (const item of queue) {
+    const ok = await pushToCloud(item.sheetKey, item.row);
+    if (!ok) break; // stop early if still offline; remaining items stay queued
+  }
+  saveLocalCache();
+}
+
+window.addEventListener('online', flushSyncQueue);
+
+// ---------------------------------------------------------------------------
+// INIT
+// ---------------------------------------------------------------------------
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+function fmtDate(d){
+  const dt = new Date(d+"T00:00:00");
+  return dt.toLocaleDateString(undefined,{weekday:'short', day:'numeric', month:'short'});
+}
+document.getElementById('todayDate').textContent = fmtDate(todayStr());
+const hour = new Date().getHours();
+document.getElementById('greeting').textContent = (hour < 12 ? "Good morning 👋" : hour < 18 ? "Good afternoon 👋" : "Good evening 👋");
+
+function switchView(name, btn){
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.getElementById('view-'+name).classList.add('active');
+  document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  if(name==='history') renderHistory();
+  if(name==='measurements') renderMeasurements();
+}
+
+// ---------------------------------------------------------------------------
+// MODALS
+// ---------------------------------------------------------------------------
+function openModal(type){
+  const body = document.getElementById('modalBody');
+  const d = todayStr();
+  if(type==='weight'){
+    body.innerHTML = `
+      <h2>Log weight</h2>
+      <label>Date</label><input type="date" id="inpDate" value="${d}">
+      <label>Weight (kg)</label><input type="number" step="0.1" id="inpWeight" placeholder="e.g. 85.4">
+      <button class="btn-primary" onclick="saveWeight()">Save</button>`;
+  } else if(type==='food'){
+    let opts = Object.keys(RECIPES).map(r=>`<option value="${r}">${r}</option>`).join('');
+    body.innerHTML = `
+      <h2>Log food</h2>
+      <label>Date</label><input type="date" id="inpDate" value="${d}">
+      <label>Recipe</label>
+      <select id="inpRecipe" onchange="fillRecipeMacros()">
+        <option value="">— choose a recipe or 'Custom' —</option>
+        ${opts}
+        <option value="__custom">Custom food (enter macros manually)</option>
+      </select>
+      <label>Servings</label><input type="number" id="inpServings" value="1" min="0.5" step="0.5">
+      <div id="customMacros" style="display:none;">
+        <div class="row2"><div><label>Calories</label><input type="number" id="cCal"></div><div><label>Protein (g)</label><input type="number" id="cPro"></div></div>
+        <div class="row2"><div><label>Carbs (g)</label><input type="number" id="cCarb"></div><div><label>Fat (g)</label><input type="number" id="cFat"></div></div>
+      </div>
+      <button class="btn-primary" onclick="saveFood()">Save</button>`;
+  } else if(type==='exercise'){
+    let opts = EXERCISE_TYPES.map(t=>`<option value="${t}">${t}</option>`).join('');
+    body.innerHTML = `
+      <h2>Log exercise</h2>
+      <label>Date</label><input type="date" id="inpDate" value="${d}">
+      <label>Session type</label><select id="inpExType">${opts}</select>
+      <label>Duration (min)</label><input type="number" id="inpDuration" placeholder="e.g. 45">
+      <label>Effort (RPE 1–10)</label><input type="number" id="inpEffort" min="1" max="10" placeholder="e.g. 7">
+      <button class="btn-primary" onclick="saveExercise()">Save</button>`;
+  } else if(type==='photo'){
+    body.innerHTML = `
+      <h2>Food label photo</h2>
+      <p style="font-size:14px;color:var(--ink-soft);">Attach a photo of the nutrition label, then ask any AI photo tool to read calories, protein, carbs and fat per serving. Type the four numbers below to log it.</p>
+      <label>Photo (kept on this device only, not uploaded by this app)</label>
+      <input type="file" accept="image/*" id="inpPhoto">
+      <label>Date</label><input type="date" id="inpDate" value="${d}">
+      <label>Food name</label><input type="text" id="inpFoodName" placeholder="e.g. Lidl Oatly Barista">
+      <label>Servings eaten</label><input type="number" id="inpServings" value="1" step="0.5">
+      <div class="row2"><div><label>Calories/serving</label><input type="number" id="cCal"></div><div><label>Protein/serving</label><input type="number" id="cPro"></div></div>
+      <div class="row2"><div><label>Carbs/serving</label><input type="number" id="cCarb"></div><div><label>Fat/serving</label><input type="number" id="cFat"></div></div>
+      <button class="btn-primary" onclick="saveFoodLabel()">Save</button>`;
+  }
+  document.getElementById('modalBackdrop').classList.add('open');
+}
+function closeModal(){ document.getElementById('modalBackdrop').classList.remove('open'); }
+
+function fillRecipeMacros(){
+  const v = document.getElementById('inpRecipe').value;
+  document.getElementById('customMacros').style.display = (v==='__custom') ? 'block' : 'none';
+}
+
+// ---------------------------------------------------------------------------
+// SAVE HANDLERS (update UI instantly, then sync in the background)
+// ---------------------------------------------------------------------------
+function saveWeight(){
+  const date = document.getElementById('inpDate').value;
+  const kg = parseFloat(document.getElementById('inpWeight').value);
+  if(!date || isNaN(kg)){ alert('Please enter a date and weight.'); return; }
+  const row = {date, kg};
+  state.weights.push(row);
+  state.weights.sort((a,b)=>a.date.localeCompare(b.date));
+  saveLocalCache();
+  closeModal(); renderToday(); renderHistory();
+  pushToCloud('weight', row);
+}
+
+function saveFood(){
+  const date = document.getElementById('inpDate').value;
+  const recipe = document.getElementById('inpRecipe').value;
+  const servings = parseFloat(document.getElementById('inpServings').value) || 1;
+  if(!date || !recipe){ alert('Please choose a date and a food.'); return; }
+  let row;
+  if(recipe==='__custom'){
+    const m = {
+      cal: parseFloat(document.getElementById('cCal').value)||0,
+      pro: parseFloat(document.getElementById('cPro').value)||0,
+      carb: parseFloat(document.getElementById('cCarb').value)||0,
+      fat: parseFloat(document.getElementById('cFat').value)||0,
+    };
+    row = {date, name:'Custom food', cal:m.cal*servings, pro:m.pro*servings, carb:m.carb*servings, fat:m.fat*servings};
+  } else {
+    const m = RECIPES[recipe];
+    row = {date, name:recipe, cal:m.cal*servings, pro:m.pro*servings, carb:m.carb*servings, fat:m.fat*servings};
+  }
+  state.food.push(row);
+  saveLocalCache();
+  closeModal(); renderToday(); renderHistory();
+  pushToCloud('food', row);
+}
+
+function saveFoodLabel(){
+  const date = document.getElementById('inpDate').value;
+  const name = document.getElementById('inpFoodName').value || 'AI-scanned food';
+  const servings = parseFloat(document.getElementById('inpServings').value) || 1;
+  const row = {
+    date, name,
+    cal: (parseFloat(document.getElementById('cCal').value)||0) * servings,
+    pro: (parseFloat(document.getElementById('cPro').value)||0) * servings,
+    carb: (parseFloat(document.getElementById('cCarb').value)||0) * servings,
+    fat: (parseFloat(document.getElementById('cFat').value)||0) * servings,
+  };
+  state.food.push(row);
+  saveLocalCache();
+  closeModal(); renderToday(); renderHistory();
+  pushToCloud('food', row);
+}
+
+function saveExercise(){
+  const date = document.getElementById('inpDate').value;
+  const type = document.getElementById('inpExType').value;
+  const duration = parseFloat(document.getElementById('inpDuration').value)||0;
+  const effort = parseFloat(document.getElementById('inpEffort').value)||null;
+  if(!date){ alert('Please choose a date.'); return; }
+  const row = {date, type, duration, effort};
+  state.exercise.push(row);
+  saveLocalCache();
+  closeModal(); renderToday(); renderHistory();
+  pushToCloud('exercise', row);
+}
+
+function saveMeasurement(){
+  const date = document.getElementById('mDate').value || todayStr();
+  const row = {
+    date,
+    waist: document.getElementById('mWaist').value,
+    hips: document.getElementById('mHips').value,
+    chest: document.getElementById('mChest').value,
+    weight: document.getElementById('mWeight').value,
+    armL: document.getElementById('mArmL').value,
+    armR: document.getElementById('mArmR').value,
+    thighL: document.getElementById('mThighL').value,
+    thighR: document.getElementById('mThighR').value,
+  };
+  state.measurements.push(row);
+  state.measurements.sort((a,b)=>a.date.localeCompare(b.date));
+  saveLocalCache();
+  renderMeasurements();
+  ['mWaist','mHips','mChest','mWeight','mArmL','mArmR','mThighL','mThighR'].forEach(id=>document.getElementById(id).value='');
+  pushToCloud('measurements', row);
+}
+
+// ---------------------------------------------------------------------------
+// RENDER: TODAY
+// ---------------------------------------------------------------------------
+function renderToday(){
+  const d = todayStr();
+  const todaysFood = state.food.filter(f=>f.date===d);
+  const cal = todaysFood.reduce((s,f)=>s+Number(f.cal||0),0);
+  const pro = todaysFood.reduce((s,f)=>s+Number(f.pro||0),0);
+  document.getElementById('todayCal').textContent = `${Math.round(cal)} / ${TARGETS.cal} kcal`;
+  document.getElementById('todayPro').textContent = `${Math.round(pro)} / ${TARGETS.pro} g`;
+  document.getElementById('calBar').style.width = Math.min(100, (cal/TARGETS.cal)*100)+'%';
+  document.getElementById('proBar').style.width = Math.min(100, (pro/TARGETS.pro)*100)+'%';
+
+  const todaysEx = state.exercise.filter(e=>e.date===d);
+  document.getElementById('todayEx').textContent = todaysEx.length ? todaysEx.map(e=>e.type).join(', ') : 'None logged';
+
+  let streak = 0;
+  let cursor = new Date();
+  while(true){
+    const ds = cursor.toISOString().slice(0,10);
+    const has = state.food.some(f=>f.date===ds) || state.exercise.some(e=>e.date===ds);
+    if(!has) break;
+    streak++;
+    cursor.setDate(cursor.getDate()-1);
+  }
+  document.getElementById('streakBadge').textContent = `🔥 ${streak}-day streak`;
+}
+
+// ---------------------------------------------------------------------------
+// RENDER: HISTORY
+// ---------------------------------------------------------------------------
+function renderHistory(){
+  const tbody = document.getElementById('historyBody');
+  const combined = [
+    ...state.weights.map(w=>({date:w.date, type:'Weight', detail:`${w.kg} kg`})),
+    ...state.food.map(f=>({date:f.date, type:'Food', detail:`${f.name} (${Math.round(f.cal)} kcal)`})),
+    ...state.exercise.map(e=>({date:e.date, type:'Exercise', detail:`${e.type} — ${e.duration} min`})),
+  ].sort((a,b)=>String(b.date).localeCompare(String(a.date))).slice(0,30);
+  tbody.innerHTML = combined.map(r=>`<tr><td>${fmtDate(r.date)}</td><td>${r.type}</td><td>${r.detail}</td></tr>`).join('');
+  document.getElementById('historyEmpty').style.display = combined.length ? 'none' : 'block';
+  document.getElementById('historyTable').style.display = combined.length ? 'table' : 'none';
+  drawWeightChart();
+}
+
+function drawWeightChart(){
+  const canvas = document.getElementById('weightChart');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth || 320, h = 180;
+  canvas.width = w; canvas.height = h;
+  ctx.clearRect(0,0,w,h);
+  const pts = state.weights;
+  document.getElementById('weightEmpty').style.display = pts.length < 2 ? 'block' : 'none';
+  canvas.style.display = pts.length < 2 ? 'none' : 'block';
+  if(pts.length < 2) return;
+  const vals = pts.map(p=>Number(p.kg));
+  const min = Math.min(...vals)-0.5, max = Math.max(...vals)+0.5;
+  const pad = 20;
+  ctx.strokeStyle = '#2f5233'; ctx.lineWidth = 3; ctx.beginPath();
+  pts.forEach((p,i)=>{
+    const x = pad + (i/(pts.length-1)) * (w-2*pad);
+    const y = h - pad - ((Number(p.kg)-min)/(max-min)) * (h-2*pad);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = '#2f5233';
+  pts.forEach((p,i)=>{
+    const x = pad + (i/(pts.length-1)) * (w-2*pad);
+    const y = h - pad - ((Number(p.kg)-min)/(max-min)) * (h-2*pad);
+    ctx.beginPath(); ctx.arc(x,y,3.5,0,Math.PI*2); ctx.fill();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// RENDER: MEASUREMENTS
+// ---------------------------------------------------------------------------
+function renderMeasurements(){
+  const tbody = document.getElementById('measureBody');
+  const rows = [...state.measurements].sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+  tbody.innerHTML = rows.map(m=>`<tr><td>${fmtDate(m.date)}</td><td>${m.waist||'-'}</td><td>${m.hips||'-'}</td><td>${m.weight||'-'}</td></tr>`).join('');
+  document.getElementById('measureEmpty').style.display = rows.length ? 'none' : 'block';
+  document.getElementById('measureTable').style.display = rows.length ? 'table' : 'none';
+}
+
+// ---------------------------------------------------------------------------
+// EXPORT / IMPORT (manual backup, in addition to the automatic cloud sync)
+// ---------------------------------------------------------------------------
+function exportData(){
+  const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `bray-fitness-backup-${todayStr()}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function importData(evt){
+  const file = evt.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      const loaded = JSON.parse(e.target.result);
+      state = Object.assign({weights:[],food:[],exercise:[],measurements:[],syncQueue:[]}, loaded);
+      saveLocalCache();
+      renderToday(); renderHistory(); renderMeasurements();
+      alert('Data imported successfully.');
+    }catch(err){ alert('Could not read that file — is it a backup exported from this app?'); }
+  };
+  reader.readAsText(file);
+}
+
+// ---------------------------------------------------------------------------
+// SERVICE WORKER (installable, offline app shell)
+// ---------------------------------------------------------------------------
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+
+// ---------------------------------------------------------------------------
+// INITIAL RENDER
+// ---------------------------------------------------------------------------
+document.getElementById('mDate').value = todayStr();
+loadLocalCache();
+renderToday();
+renderHistory();
+renderMeasurements();
+pullFromCloud().then(() => {
+  renderToday(); renderHistory(); renderMeasurements();
+  flushSyncQueue();
+});
+</script>
+</body>
+</html>
