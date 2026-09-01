@@ -1,9 +1,17 @@
-// Bray Fitness Tracker — service worker
-// Caches the app shell for offline use; always goes to the network for
-// Google Apps Script data requests (never caches your live data).
+// Bray Fitness Tracker — CLEAN service worker
+// - Caches app shell
+// - Always fetches Google Script live
+// - Ignores browser extension traffic
+// - Prevents console spam from failed extension requests
 
 const CACHE_NAME = "bray-fitness-v1";
-const APP_SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
+const APP_SHELL = [
+  "./",
+  "./index.html",
+  "./manifest.json",
+  "./icon-192.png",
+  "./icon-512.png"
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -24,20 +32,17 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Never cache calls to the Google Sheets backend — always hit the network.
-  if (url.hostname.includes("script.google.com")) {
-    event.respondWith(
-      fetch(event.request).catch(
-        () => new Response(JSON.stringify({ error: "offline" }), {
-          headers: { "Content-Type": "application/json" },
-        })
-      )
-    );
-    return;
+  // 1. Ignore browser extension traffic (DeepSeek, StudyQuicks, Autotrack, etc.)
+  if (
+    url.protocol === "chrome-extension:" ||
+    url.hostname.includes("studyquicks") ||
+    url.hostname.includes("autotrack") ||
+    url.hostname.includes("math_h5")
+  ) {
+    return; // Do nothing — prevents spam
   }
 
-  // App shell: cache-first, falling back to network.
-  event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
-  );
-});
+  // 2. Always fetch Google Apps Script live (never cache)
+  if (url.hostname.includes("script.google.com")) {
+    event.respondWith(
+      fetch(event.request).
