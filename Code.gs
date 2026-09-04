@@ -2,25 +2,28 @@
  * BRAY FITNESS TRACKER — Google Sheets backend
  * =============================================
  * Paste this whole file into the Apps Script editor attached to your
- * spreadsheet (Extensions -> Apps Script), replacing whatever is there,
- * then click Deploy -> Manage deployments -> edit (pencil) icon on your
- * existing deployment -> New version -> Deploy.
- * This keeps your existing /exec URL working:
- *   https://script.google.com/macros/s/AKfycbzXkABridi2HySg4LvbjxyiMfgqM7iIYOpHhjucMJquK64H9EXGWM33tJeoKA6hczCE/exec
+ * spreadsheet (Extensions -> Apps Script), replacing whatever is there.
  *
- * Deployment settings required (Deploy -> New deployment if setting up fresh):
+ * *** YOU MUST REDEPLOY AFTER PASTING, NOT JUST SAVE ***
+ * Saving the code alone does NOT update your live /exec URL. Go to:
+ *   Deploy -> Manage deployments -> click the pencil (edit) icon on your
+ *   existing deployment -> Version: "New version" -> Deploy.
+ * This keeps your existing URL working:
+ *   https://script.google.com/macros/s/AKfycbwgjKYnZFuObPAVq_Wwa8pkA5zxEMPX_PnHshcmkofGFx3Wg6xiCxT3nSVo1BC9aWQ3/exec
+ * If you pick "Test deployments" or forget to select "New version", your
+ * changes will NOT go live and the app will keep talking to the old code.
+ *
+ * Deployment settings required:
  *   Execute as:  Me
  *   Who has access:  Anyone
- * (If access isn't "Anyone", the app running on GitHub Pages won't be able
- *  to reach it, since it's not you being logged in when the page loads.)
+ * If access is "Anyone with Google account" instead, requests from the
+ * hosted page will be redirected to a Google sign-in page and fail.
  *
- * WHAT THIS DOES
- * The app writes to four dedicated tabs it creates automatically the first
- * time you use it — "PWA - Weight", "PWA - Food", "PWA - Exercise",
- * "PWA - Measurements" — so it never touches or reformats your existing
- * Master Tracker tabs. You can reference these new tabs from your
- * dashboards with normal formulas (e.g. IMPORTRANGE-style SUMIFS) if you
- * want them to feed into the Weekly/Monthly Dashboard later.
+ * WHY GET, NOT POST
+ * Writes are sent as GET requests with the data in the URL (see
+ * index.html). This sidesteps a well-known issue where browsers can't
+ * reliably read the response of a cross-origin POST to an Apps Script Web
+ * App — GET requests do not have this problem.
  */
 
 const SHEETS = {
@@ -33,8 +36,21 @@ const SHEETS = {
   },
 };
 
+// NOTE ON GET-ONLY DESIGN
+// Writes are handled via doGet (action=add) rather than doPost. This is
+// deliberate: Apps Script Web Apps deployed for "Anyone" access frequently
+// fail to return readable cross-origin responses to POST requests from a
+// browser (the CORS headers on the response after Google's internal
+// redirect are inconsistent), while a plain GET request reliably works.
+// Since our payloads are small (a few short fields), sending them as URL
+// query parameters avoids the problem entirely. doPost is kept as a
+// fallback/alias in case you ever call this from a server-side context
+// that doesn't have the same browser CORS restrictions.
+
 function doGet(e) {
-  const action = (e && e.parameter && e.parameter.action) || 'getAll';
+  const params = (e && e.parameter) || {};
+  const action = params.action || 'getAll';
+
   if (action === 'getAll') {
     return jsonResponse_({
       weights: readSheet_(SHEETS.weight),
@@ -43,9 +59,24 @@ function doGet(e) {
       measurements: readSheet_(SHEETS.measurements),
     });
   }
+
+  if (action === 'add') {
+    try {
+      const sheetKey = params.sheetKey;
+      const row = JSON.parse(params.row || '{}');
+      if (!SHEETS[sheetKey]) throw new Error('Unknown sheetKey: ' + sheetKey);
+      addRow_(sheetKey, row);
+      return jsonResponse_({ status: 'ok' });
+    } catch (err) {
+      return jsonResponse_({ status: 'error', message: String(err) });
+    }
+  }
+
   return jsonResponse_({ error: 'Unknown action: ' + action });
 }
 
+// Kept for completeness / non-browser callers. Browser code in index.html
+// does not use this path (see note above).
 function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
